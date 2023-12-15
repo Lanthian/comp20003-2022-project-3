@@ -1,0 +1,19 @@
+if home == free:
+	free = 0
+	for each neighbour:
+		if neighbour == free: count ++
+		else if neighbour == goal && home == free: count ++ 
+					// maybe check if completed
+		else if neighbour == init && home == free &&
+			neighbour colour incomplete: (count + 1) 
+					// only once per for loop
+if home == init:
+	free = 1
+	for each neighbour:
+		if neighbour == free: count++
+		else if neighbour.colour = home.colour: count++
+					// goal neighbour covered above
+
+
+free can return as 5 (treats home == init as a free input)
+	

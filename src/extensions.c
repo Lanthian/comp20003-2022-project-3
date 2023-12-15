@@ -1,0 +1,325 @@
+#include "extensions.h"
+#include "options.h"
+
+//////////////////////////////////////////////////////////////////////
+// Local function definitions
+int custom_free_count(const game_info_t* info, const game_state_t* state, pos_t pos);
+
+
+//////////////////////////////////////////////////////////////////////
+// For sorting colors
+
+int color_features_compare(const void* vptr_a, const void* vptr_b) {
+
+	const color_features_t* a = (const color_features_t*)vptr_a;
+	const color_features_t* b = (const color_features_t*)vptr_b;
+
+	int u = cmp(a->user_index, b->user_index);
+	if (u) { return u; }
+
+	int w = cmp(a->wall_dist[0], b->wall_dist[0]);
+	if (w) { return w; }
+
+	int g = -cmp(a->wall_dist[1], b->wall_dist[1]);
+	if (g) { return g; }
+
+	return -cmp(a->min_dist, b->min_dist);
+
+}
+
+//////////////////////////////////////////////////////////////////////
+// Place the game colors into a set order
+
+void game_order_colors(game_info_t* info,
+                       game_state_t* state) {
+
+	if (g_options.order_random) {
+    
+		srand(now() * 1e6);
+    
+		for (size_t i=info->num_colors-1; i>0; --i) {
+			size_t j = rand() % (i+1);
+			int tmp = info->color_order[i];
+			info->color_order[i] = info->color_order[j];
+			info->color_order[j] = tmp;
+		}
+
+	} else { // not random
+
+		color_features_t cf[MAX_COLORS];
+		memset(cf, 0, sizeof(cf));
+
+		for (size_t color=0; color<info->num_colors; ++color) {
+			cf[color].index = color;
+			cf[color].user_index = MAX_COLORS;
+		}
+    
+
+		for (size_t color=0; color<info->num_colors; ++color) {
+			
+			int x[2], y[2];
+			
+			for (int i=0; i<2; ++i) {
+				pos_get_coords(state->pos[color], x+i, y+i);
+				cf[color].wall_dist[i] = get_wall_dist(info, x[i], y[i]);
+			}
+
+			int dx = abs(x[1]-x[0]);
+			int dy = abs(y[1]-y[0]);
+			
+			cf[color].min_dist = dx + dy;
+			
+		
+
+		}
+
+
+		qsort(cf, info->num_colors, sizeof(color_features_t),
+		      color_features_compare);
+
+		for (size_t i=0; i<info->num_colors; ++i) {
+			info->color_order[i] = cf[i].index;
+		}
+    
+	}
+
+	if (!g_options.display_quiet) {
+
+		printf("\n************************************************"
+		       "\n*               Branching Order                *\n");
+		if (g_options.order_most_constrained) {
+			printf("* Will choose color by most constrained\n");
+		} else {
+			printf("* Will choose colors in order: ");
+			for (size_t i=0; i<info->num_colors; ++i) {
+				int color = info->color_order[i];
+				printf("%s", color_name_str(info, color));
+			}
+			printf("\n");
+		}
+		printf ("*************************************************\n\n");
+
+	}
+
+}
+
+
+
+//////////////////////////////////////////////////////////////////////
+// Check for dead-end regions of freespace where there is no way to
+// put an active path into and out of it. Any freespace node which
+// has only one free neighbor represents such a dead end. For the
+// purposes of this check, cur and goal positions count as "free".
+
+int game_check_deadends(const game_info_t* info,
+                        const game_state_t* state) {
+	// Point from which surrounding 12 tiles are checked <- last move
+	pos_t home_pos = state->pos[state->last_color];
+
+	int FREE_REQ = 2;
+	int x, y;
+	pos_get_coords(home_pos, &x, &y);
+	// int x2, y2;
+	// pos_get_coords(state->pos[3], &x2, &y2);
+	// printf("%d.%d", x2, y2);
+	printf("==================(%d,%d)[%d]==================\n", x, y, cell_get_color(state->cells[home_pos]));			// todo
+
+	for (int dir1 = 0; dir1 < 4; dir1++) {
+		pos_t n1_pos = pos_offset_pos(info, home_pos, dir1);
+
+		// Skip cell if out of bounds / invalid
+		if (n1_pos == INVALID_POS) continue;
+		// Only process cell if FREE or incomplete INIT type - others cannot be a deadend
+		int cell_type = cell_get_type(state->cells[n1_pos]);
+
+		if (cell_type == TYPE_FREE);
+		else if (cell_type == TYPE_INIT && 
+				!(state->completed & (1 << cell_get_color(state->cells[n1_pos]))));
+		else continue;
+
+		// If not enough free spaces, deadend found - return 1.
+		if (custom_free_count(info, state, n1_pos) < FREE_REQ) return 1;
+
+
+		for (int dir2 = 0; dir2 < 4; dir2++) {
+			// currently checks some cells twice - fix this?
+			pos_t n2_pos = pos_offset_pos(info, n1_pos, dir2);
+			
+			// Skip neighbour if out of bounds / invalid
+			if (n2_pos == INVALID_POS) continue;
+			// Skip cell if home_pos (no need to check for deadend...)
+			if (n2_pos == home_pos) continue;
+			// Only process cell if FREE or incomplete INIT type - others cannot be a deadend
+			cell_type = cell_get_type(state->cells[n2_pos]);
+			
+			if (cell_type == TYPE_FREE);
+			else if ((cell_type == TYPE_INIT) && 
+					!(state->completed & (1 << cell_get_color(state->cells[n2_pos]))));
+			else continue;
+
+			// If not enough free spaces, deadend found - return 1.
+			if (custom_free_count(info, state, n2_pos) < FREE_REQ) return 1;
+		}
+	}
+
+	// No deadends found - return 0.
+	return 0;
+}
+
+
+int custom_free_count(const game_info_t* info, const game_state_t* state, pos_t pos) {
+	/* Assume function is only passed cell positions of type FREE & INIT. 
+	*/
+	int home_type = cell_get_type(state->cells[pos]);
+	
+	int num_free = (home_type == TYPE_INIT) ? 1 : 0;
+	int valid_init_nbor = 0;
+
+	for (int dir = 0; dir < 4; dir++) {
+		pos_t n_pos = pos_offset_pos(info, pos, dir);
+
+		// Skip neighbour if out of bounds / invalid
+		if (n_pos == INVALID_POS) continue;
+
+		int n_type = cell_get_type(state->cells[n_pos]);
+
+		if (n_type == TYPE_FREE) num_free++;
+
+		// Treat different cells as free depending on home_type
+		if (home_type == TYPE_FREE) {
+			if (n_type == TYPE_GOAL) num_free++;
+			else if (n_type == TYPE_INIT && 
+				!(state->completed & 
+					(1 << cell_get_color(state->cells[n_pos])))) valid_init_nbor = 1;
+
+		} else { // type == TYPE_INIT
+			if (cell_get_color(state->cells[n_pos] == 
+				cell_get_color(state->cells[pos]))) num_free++;
+		}
+
+		// Treat pipe end as a free space
+		if (n_pos == state->pos[state->last_color]) num_free++;
+
+	}
+
+	return num_free + valid_init_nbor;
+}                             
+
+
+
+
+
+                                         
+
+// int num_free = 0;
+	// int init_connected = 0;
+	// int home_type = cell_get_type(state->cells[pos]);
+
+	// for (int dir=0; dir < 4; dir++) {
+	// 	pos_t neighbour_pos = pos_offset_pos(info, pos, dir);
+
+	// 	// Skip neighbour if out of bounds / invalid
+	// 	if (neighbour_pos == INVALID_POS) continue;
+		
+	// 	int cell_type = cell_get_type(state->cells[neighbour_pos]);
+	// 	// Add to free neighbours count if free or 'effectively free'
+	// 	if (cell_type == TYPE_FREE) num_free++;
+	// 	else if (cell_type == TYPE_GOAL) num_free++;
+	// 	else if (cell_type == TYPE_INIT && home_type == TYPE_FREE &&
+	// 		!(state->completed & (1 << cell_get_color(state->cells[neighbour_pos])))) init_connected = 1;
+	// 	else if (neighbour_pos == state->pos[state->last_color]) num_free++;
+
+	// 	// printf("{%d, %d & %d != %d}", 
+	// 	// 	cell_type == TYPE_INIT, 
+	// 	// 	state->completed, 
+	// 	// 	(1 << cell_get_color(state->cells[neighbour_pos])), 
+	// 	// 	!(state->completed & (1 << cell_get_color(state->cells[neighbour_pos])))
+	// 	// );
+	// }
+
+	// int x, y;
+	// pos_get_coords(pos, &x, &y);
+	// printf("=(%d,%d)=:", x, y);			// todo
+	// printf("(%d/%d;%d)\n", num_free, init_connected, num_free + (init_connected && (cell_get_type(state->cells[pos]) != TYPE_INIT)));				// todo
+	// return num_free + (init_connected && (cell_get_type(state->cells[pos]) != TYPE_INIT));
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // Point from which surrounding 12 tiles are checked <- last move
+// 	pos_t home_pos = state->pos[state->last_color];
+
+// 	int x, y;
+// 	pos_get_coords(home_pos, &x, &y);
+// 	// int x2, y2;
+// 	// pos_get_coords(state->pos[3], &x2, &y2);
+// 	// printf("%d.%d", x2, y2);
+// 	printf("==================(%d,%d)[%d]==================\n", x, y, cell_get_color(state->cells[home_pos]));			// todo
+
+// 	for (int dir1 = 0; dir1 < 4; dir1++) {
+// 		// printf("ello\n");			// todo
+// 		pos_t n1_pos = pos_offset_pos(info, home_pos, dir1);
+// 		int free_req = 2;
+
+// 		// Skip cell if out of bounds / invalid
+// 		if (n1_pos == INVALID_POS) continue;
+// 		// Skip cell if not empty - cannot be a dead end
+// 		int cell_type = cell_get_type(state->cells[n1_pos]);
+
+// 		// printf("\t{{{%d ?= %d}}}\n", cell_type, TYPE_INIT);			// todo
+// 		// int temp = (state->completed & (1 << cell_get_color(state->cells[n1_pos])));			// todo
+// 		// printf("temp=%d\n", temp);			// todo
+
+// 		if (cell_type == TYPE_FREE);
+// 		else if (cell_type == TYPE_INIT && 
+// 				!(state->completed & (1 << cell_get_color(state->cells[n1_pos])))) {
+// 			// cell is an initial position and incomplete -> non blocked req = 1
+// 			free_req = 1;
+// 		} else {
+// 			// printf("CONTINUED\n");						// todo
+// 			continue;
+// 		}
+
+// 		// If not enough free spaces, deadend found - return 1.
+// 		if (custom_free_count(info, state, n1_pos) < free_req) return 1;
+
+
+// 		for (int dir2 = 0; dir2 < 4; dir2++) {
+// 			// printf("lo\n");				// todo
+// 			pos_t n2_pos = pos_offset_pos(info, n1_pos, dir2);
+
+// 			// int t1, t2;
+// 			// pos_get_coords(n2_pos, &t1, &t2);
+// 			// printf("[%d,%d]=:", t1, t2);			// todo
+
+			
+// 			// Skip neighbour if out of bounds / invalid
+// 			if (n2_pos == INVALID_POS) continue;
+// 			// Skip cell if home_pos (no need to check for deadend...)
+// 			if (n2_pos == home_pos) continue;
+// 			// Skip cell if not empty - cannot be a dead end
+// 			cell_type = cell_get_type(state->cells[n2_pos]);
+			
+// 			// printf("\t{{{%d ?= %d}}}\n", cell_type, TYPE_INIT);			// todo
+// 			// int temp = (state->completed & (1 << cell_get_color(state->cells[n2_pos])));			// todo
+// 			// printf("temp=%d | %d & %d\n", temp, state->completed, (1 << cell_get_color(state->cells[n2_pos])));			// todo
+
+// 			if (cell_type == TYPE_FREE) free_req = 2;
+// 			else if ((cell_type == TYPE_INIT) && 
+// 					!(state->completed & (1 << cell_get_color(state->cells[n2_pos])))) {
+// 				// cell is an initial position and incomplete -> non blocked req = 1
+// 				free_req = 1;
+// 			} else continue;
+
+// 			// If not enough free spaces, deadend found - return 1.
+// 			if (custom_free_count(info, state, n2_pos) < free_req) return 1;
+// 		}

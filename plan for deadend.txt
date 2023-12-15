@@ -1,0 +1,19 @@
+Checks
+
+If a free cell is has at least 2 free cells (includes valid inouts) it is not a deadend
+
+If a free cell has an incomplete in, +1, an incomplete goal, +1.
+
+If an in cell has at least 1 free cell or [is incomplete and has a matching colour next to it], it is not a deadend
+
+if a goal cell has at least 1 free cell or [is complete and has a matching init next to it], it is not a deadend
+
+If a pipe cell is incomplete and [has at least 1 free cell or 2 matching colours next to it], it is not a deadend
+
+
+
+
+Free:2 free
+Free:1 free, 1 incomplete goal
+Free:1 free, 1 incomplete (unstarted) init
+Free:
